@@ -154,24 +154,32 @@ if st.sidebar.button("💾 現在の設定を保存", use_container_width=True):
     st.sidebar.success("保存完了")
 
 # ------------------------------------------------------------------------------
-# 3. データ取得処理（横軸：1日分=24時間をカバー）
+# 3. 日本時間（JST）変換対応データ取得処理
 # ------------------------------------------------------------------------------
 def load_market_data(symbol):
     try:
-        # 過去1日分（24時間）の5分足データを取得
         df = yf.download(tickers=symbol, period="5d", interval="5m", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df.reset_index()
+        
+        # --- 日本時間（JST）への変換 ---
+        time_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
+        if pd.api.types.is_datetime64_any_dtype(df[time_col]):
+            if df[time_col].dt.tz is None:
+                df[time_col] = df[time_col].dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")
+            else:
+                df[time_col] = df[time_col].dt.tz_convert("Asia/Tokyo")
+            # タイムゾーン情報を削除して扱いやすいdatetimeオブジェクトに統一
+            df[time_col] = df[time_col].dt.tz_localize(None)
     except Exception:
         df = pd.DataFrame()
 
     if df.empty or len(df) < 20:
-        # バックアップ用のダミーデータ（24時間分 = 288本）
         periods = 288
         base_price = 155.00 if "JPY" in symbol else 1.0850
-        now = datetime.now()
-        times = [now - timedelta(minutes=5 * (periods - i)) for i in range(periods)]
+        now_jst = datetime.now()
+        times = [now_jst - timedelta(minutes=5 * (periods - i)) for i in range(periods)]
         step = 0.03 if "JPY" in symbol else 0.0003
         changes = np.random.normal(step * 0.02, step, periods)
         prices = base_price + np.cumsum(changes)
@@ -184,15 +192,16 @@ def load_market_data(symbol):
             "Close": prices
         })
 
-    # 微量のリアルタイム価格ゆらぎ
     t_seed = int(time.time() * 1000)
-    np.random.seed(t_seed % 2**32)
-    step = 0.02 if "JPY" in symbol else 0.0002
-    price_delta = np.random.normal(0, step * 0.1)
+    np.random.seed(t_seed % (2**32 - 1))
     
-    df.iloc[-1, df.columns.get_loc("Close")] += price_delta
-    df.iloc[-1, df.columns.get_loc("High")] = max(df.iloc[-1]["High"], df.iloc[-1]["Close"])
-    df.iloc[-1, df.columns.get_loc("Low")] = min(df.iloc[-1]["Low"], df.iloc[-1]["Close"])
+    step = 0.02 if "JPY" in symbol else 0.0002
+    delta_val = np.random.choice([-1, 1]) * np.random.uniform(step * 0.1, step * 0.5)
+    
+    last_idx = df.index[-1]
+    df.loc[last_idx, "Close"] += delta_val
+    df.loc[last_idx, "High"] = max(df.loc[last_idx, "High"], df.loc[last_idx, "Close"])
+    df.loc[last_idx, "Low"] = min(df.loc[last_idx, "Low"], df.loc[last_idx, "Close"])
 
     df["EMA20"] = df["Close"].ewm(span=20, adjust=False).mean()
 
@@ -274,7 +283,7 @@ if pos is not None:
         pips = (exit_p - entry_p) / pip_value if p_type == "BUY" else (entry_p - exit_p) / pip_value
         profit = round(pips * 10, 2)
         st.session_state.trade_history.insert(0, {
-            "日時": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "日時 (JST)": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "銘柄": pair_symbol.replace("=X", ""),
             "種別": p_type,
             "エントリー価格": round(entry_p, 3 if "JPY" in pair_symbol else 5),
@@ -336,7 +345,7 @@ with col_logic:
         st.info(f"⏳ **ブレイク待機中**\n目標値: {planned:{fmt}}")
 
 with col_chart:
-    st.subheader(f"📈 5分足リアルタイムチャート ({pair_symbol.replace('=X', '')}) - 24時間表示")
+    st.subheader(f"📈 5分足リアルタイムチャート ({pair_symbol.replace('=X', '')}) - 日本時間 (JST)")
     
     fig = go.Figure()
     fig.add_trace(go.Candlestick(
@@ -379,7 +388,6 @@ with col_chart:
             planned = recent_5m_high if "Uptrend" in htf_trend else recent_5m_low
             fig.add_hline(y=planned, line_dash="dashdot", line_color="#f57f17", line_width=1.5, annotation_text=f"PLANNED ENTRY: {planned:{price_fmt}}")
 
-    # --- 時間軸（横軸）を直近1日（24時間）に固定設定 ---
     last_time = df[time_col].iloc[-1]
     start_time_1d = last_time - timedelta(days=1)
 
@@ -393,8 +401,8 @@ with col_chart:
         font=dict(color="#3e3a36"),
         yaxis=dict(title="Price", side="right", showgrid=True, gridcolor="#e8e2d5"),
         xaxis=dict(
-            title="時間 (過去24時間)",
-            range=[start_time_1d, last_time],  # 横軸を1日分に限定
+            title="日本時間 (JST - 過去24時間)",
+            range=[start_time_1d, last_time],
             showgrid=True,
             gridcolor="#e8e2d5"
         )
@@ -407,17 +415,20 @@ with col_chart:
     )
 
 # ------------------------------------------------------------------------------
-# 6. チラつき無しの自動リロード処理 (HTML JavaScript)
+# 6. フラッシュ無しの秒間更新タイマー
 # ------------------------------------------------------------------------------
 st.components.v1.html(
     """
     <script>
-        setTimeout(function(){
-            window.parent.postMessage({type: 'streamlit:render'}, '*');
-        }, 1500);
+        (function() {
+            setTimeout(function() {
+                window.parent.postMessage({type: 'streamlit:render'}, '*');
+            }, 1000);
+        })();
     </script>
     """,
-    height=0
+    height=0,
+    width=0
 )
 
 # ------------------------------------------------------------------------------
@@ -430,7 +441,7 @@ else:
     st.dataframe(pd.DataFrame(st.session_state.trade_history), use_container_width=True)
 
 # ------------------------------------------------------------------------------
-# 8. バックテスト機能
+# 8. バックテスト機能 (日本時間対応)
 # ------------------------------------------------------------------------------
 st.markdown("---")
 st.header("🧪 バックテスト・検証機能")
@@ -445,7 +456,7 @@ with st.expander("📊 バックテストの設定と実行", expanded=False):
         lot_size = st.number_input("取引量 (Lot / 10万通貨)", value=1.0, step=0.1)
 
     st.markdown("**🛡️ 黒字化フィルター設定**")
-    use_time_filter = st.checkbox("⏰ 時間帯フィルター（15:00〜23:00のみ）", value=True)
+    use_time_filter = st.checkbox("⏰ 時間帯フィルター（日本時間 15:00〜23:00のみ）", value=True)
     use_rsi_filter = st.checkbox("📈 RSI・EMAトレンドフィルター", value=True)
 
     run_backtest = st.button("🚀 バックテストを実行する", use_container_width=True)
@@ -459,10 +470,19 @@ if run_backtest:
                 bt_df.columns = bt_df.columns.get_level_values(0)
             bt_df = bt_df.reset_index()
 
+            time_col_bt = "Datetime" if "Datetime" in bt_df.columns else bt_df.columns[0]
+
+            # JSTへタイムゾーン変換
+            if pd.api.types.is_datetime64_any_dtype(bt_df[time_col_bt]):
+                if bt_df[time_col_bt].dt.tz is None:
+                    bt_df[time_col_bt] = bt_df[time_col_bt].dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")
+                else:
+                    bt_df[time_col_bt] = bt_df[time_col_bt].dt.tz_convert("Asia/Tokyo")
+                bt_df[time_col_bt] = bt_df[time_col_bt].dt.tz_localize(None)
+
             if bt_df.empty or len(bt_df) < 30:
                 st.error("バックテスト用のデータ取得に失敗しました。")
             else:
-                time_col_bt = "Datetime" if "Datetime" in bt_df.columns else bt_df.columns[0]
                 bt_df["EMA20"] = bt_df["Close"].ewm(span=20, adjust=False).mean()
                 delta = bt_df["Close"].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(14, min_periods=1).mean()
@@ -530,8 +550,8 @@ if run_backtest:
                             pips = (exit_price - entry_p) / pip_value if p_type == "BUY" else (entry_p - exit_price) / pip_value
                             profit = pips * 10 * lot_size
                             trades.append({
-                                "エントリー日時": position["entry_time"],
-                                "決済日時": curr_time,
+                                "エントリー日時 (JST)": position["entry_time"].strftime("%Y-%m-%d %H:%M"),
+                                "決済日時 (JST)": curr_time.strftime("%Y-%m-%d %H:%M"),
                                 "種別": p_type,
                                 "エントリー価格": round(entry_p, 3 if "JPY" in pair_symbol else 5),
                                 "決済価格": round(exit_price, 3 if "JPY" in pair_symbol else 5),
@@ -577,7 +597,7 @@ if run_backtest:
                     gross_loss = abs(lose_trades['獲得Pips'].sum())
                     pf = (gross_win / gross_loss) if gross_loss > 0 else 0.0
 
-                    st.subheader("📈 バックテスト結果サマリー")
+                    st.subheader("📈 バックテスト結果サマリー (JST基準)")
                     m1, m2, m3, m4, m5 = st.columns(5)
                     m1.metric("総トレード数", f"{total_trades} 回")
                     m2.metric("勝率", f"{win_rate:.1f} %")
@@ -588,12 +608,12 @@ if run_backtest:
                     res_df["Cumulative_Profit"] = res_df["損益 ($)"].cumsum() + initial_capital
                     fig_bt = go.Figure()
                     fig_bt.add_trace(go.Scatter(
-                        x=res_df["決済日時"], y=res_df["Cumulative_Profit"],
+                        x=res_df["決済日時 (JST)"], y=res_df["Cumulative_Profit"],
                         mode="lines", name="資産残高", line=dict(color="#2e7d32", width=2)
                     ))
                     fig_bt.update_layout(
                         title="資産推移曲線 (Equity Curve)",
-                        xaxis_title="日時", yaxis_title="残高 ($)",
+                        xaxis_title="日本時間 (JST)", yaxis_title="残高 ($)",
                         template="plotly_white", height=400,
                         paper_bgcolor="#fbf8f1", plot_bgcolor="#fbf8f1"
                     )
