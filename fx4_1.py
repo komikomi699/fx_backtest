@@ -50,9 +50,6 @@ if "current_position" not in st.session_state:
 if "trade_history" not in st.session_state:
     st.session_state.trade_history = []
 
-if "is_backtesting" not in st.session_state:
-    st.session_state.is_backtesting = False
-
 # ------------------------------------------------------------------------------
 # 1. 設定保存・読み込み
 # ------------------------------------------------------------------------------
@@ -129,7 +126,7 @@ auto_trade = st.sidebar.toggle("自動売買エンジン", value=init_auto)
 enable_trail = st.sidebar.toggle("建値トレールストップ機能", value=init_trail)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⏱️ 自動更新スイッチ")
+st.sidebar.header("⏱️ 自動更新設定")
 live_update = st.sidebar.checkbox("1秒ごとのリアルタイム更新を有効化", value=True)
 
 st.sidebar.markdown("---")
@@ -140,9 +137,10 @@ show_rsi_band = st.sidebar.checkbox("RSI状態を背景透過カラー表示", v
 show_trading_lines = st.sidebar.checkbox("エントリー/TP/SL ライン", value=True)
 
 # ------------------------------------------------------------------------------
-# 3. 日本時間（JST）変換対応データ取得処理
+# 3. データ取得処理（安全制御付き）
 # ------------------------------------------------------------------------------
 def load_market_data(symbol):
+    df = pd.DataFrame()
     try:
         df = yf.download(tickers=symbol, period="5d", interval="5m", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
@@ -203,197 +201,202 @@ def load_market_data(symbol):
 st.title("⚡ 水島流 MTF スキャルピング & 自動売買シミュレーター")
 
 # ------------------------------------------------------------------------------
-# 5. メインロジック & チャート描画
+# 5. 部分再描画フラグメント（画面全体のチラつき・白画面を徹底防衛）
 # ------------------------------------------------------------------------------
-df = load_market_data(pair_symbol)
+@st.fragment(run_every=1 if live_update else None)
+def render_live_dashboard():
+    df = load_market_data(pair_symbol)
 
-current_price = float(df["Close"].iloc[-1])
-recent_high = float(df["High"].iloc[-20:-1].max())
-recent_low = float(df["Low"].iloc[-20:-1].min())
+    current_price = float(df["Close"].iloc[-1])
+    recent_high = float(df["High"].iloc[-20:-1].max())
+    recent_low = float(df["Low"].iloc[-20:-1].min())
 
-buy_target_pips = round((recent_high - current_price) / pip_value, 1)
-sell_target_pips = round((current_price - recent_low) / pip_value, 1)
+    buy_target_pips = round((recent_high - current_price) / pip_value, 1)
+    sell_target_pips = round((current_price - recent_low) / pip_value, 1)
 
-recent_5m_high = float(df["High"].iloc[-6:-1].max())
-recent_5m_low = float(df["Low"].iloc[-6:-1].min())
+    recent_5m_high = float(df["High"].iloc[-6:-1].max())
+    recent_5m_low = float(df["Low"].iloc[-6:-1].min())
 
-htf_pass = ("Uptrend" in htf_trend) or ("Downtrend" in htf_trend)
-breakout_pass = (current_price >= recent_5m_high) if "Uptrend" in htf_trend else (current_price <= recent_5m_low)
-target_pass = (buy_target_pips >= min_pip_target) if "Uptrend" in htf_trend else (sell_target_pips >= min_pip_target)
+    htf_pass = ("Uptrend" in htf_trend) or ("Downtrend" in htf_trend)
+    breakout_pass = (current_price >= recent_5m_high) if "Uptrend" in htf_trend else (current_price <= recent_5m_low)
+    target_pass = (buy_target_pips >= min_pip_target) if "Uptrend" in htf_trend else (sell_target_pips >= min_pip_target)
 
-signal = "NONE"
-if htf_pass and breakout_pass and target_pass:
-    signal = "BUY" if "Uptrend" in htf_trend else "SELL"
+    signal = "NONE"
+    if htf_pass and breakout_pass and target_pass:
+        signal = "BUY" if "Uptrend" in htf_trend else "SELL"
 
-pos = st.session_state.current_position
+    pos = st.session_state.current_position
 
-if pos is not None:
-    p_type = pos["type"]
-    entry_p = pos["entry_price"]
-    
-    if enable_trail and not pos["trailed"]:
-        if p_type == "BUY" and current_price >= entry_p + (trail_activation_pips * pip_value):
-            pos["sl_price"] = entry_p
-            pos["trailed"] = True
-        elif p_type == "SELL" and current_price <= entry_p - (trail_activation_pips * pip_value):
-            pos["sl_price"] = entry_p
-            pos["trailed"] = True
+    if pos is not None:
+        p_type = pos["type"]
+        entry_p = pos["entry_price"]
+        
+        if enable_trail and not pos["trailed"]:
+            if p_type == "BUY" and current_price >= entry_p + (trail_activation_pips * pip_value):
+                pos["sl_price"] = entry_p
+                pos["trailed"] = True
+            elif p_type == "SELL" and current_price <= entry_p - (trail_activation_pips * pip_value):
+                pos["sl_price"] = entry_p
+                pos["trailed"] = True
 
-    closed = False
-    exit_p = 0.0
-    reason = ""
+        closed = False
+        exit_p = 0.0
+        reason = ""
 
-    if p_type == "BUY":
-        if current_price <= pos["sl_price"]:
-            exit_p = pos["sl_price"]
-            reason = "SL (損切)" if not pos["trailed"] else "Trail SL (建値撤退)"
-            closed = True
-        elif current_price >= pos["tp_price"]:
-            exit_p = pos["tp_price"]
-            reason = "TP (利確)"
-            closed = True
-    elif p_type == "SELL":
-        if current_price >= pos["sl_price"]:
-            exit_p = pos["sl_price"]
-            reason = "SL (損切)" if not pos["trailed"] else "Trail SL (建値撤退)"
-            closed = True
-        elif current_price <= pos["tp_price"]:
-            exit_p = pos["tp_price"]
-            reason = "TP (利確)"
-            closed = True
+        if p_type == "BUY":
+            if current_price <= pos["sl_price"]:
+                exit_p = pos["sl_price"]
+                reason = "SL (損切)" if not pos["trailed"] else "Trail SL (建値撤退)"
+                closed = True
+            elif current_price >= pos["tp_price"]:
+                exit_p = pos["tp_price"]
+                reason = "TP (利確)"
+                closed = True
+        elif p_type == "SELL":
+            if current_price >= pos["sl_price"]:
+                exit_p = pos["sl_price"]
+                reason = "SL (損切)" if not pos["trailed"] else "Trail SL (建値撤退)"
+                closed = True
+            elif current_price <= pos["tp_price"]:
+                exit_p = pos["tp_price"]
+                reason = "TP (利確)"
+                closed = True
 
-    if closed:
-        pips = (exit_p - entry_p) / pip_value if p_type == "BUY" else (entry_p - exit_p) / pip_value
-        profit = round(pips * 10, 2)
-        st.session_state.trade_history.insert(0, {
-            "日時 (JST)": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "銘柄": pair_symbol.replace("=X", ""),
-            "種別": p_type,
-            "エントリー価格": round(entry_p, 3 if "JPY" in pair_symbol else 5),
-            "決済価格": round(exit_p, 3 if "JPY" in pair_symbol else 5),
-            "獲得Pips": f"{pips:+.1f} pips",
-            "損益 ($)": f"${profit:+.2f}",
-            "決済理由": reason
-        })
-        st.session_state.current_position = None
+        if closed:
+            pips = (exit_p - entry_p) / pip_value if p_type == "BUY" else (entry_p - exit_p) / pip_value
+            profit = round(pips * 10, 2)
+            st.session_state.trade_history.insert(0, {
+                "日時 (JST)": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "銘柄": pair_symbol.replace("=X", ""),
+                "種別": p_type,
+                "エントリー価格": round(entry_p, 3 if "JPY" in pair_symbol else 5),
+                "決済価格": round(exit_p, 3 if "JPY" in pair_symbol else 5),
+                "獲得Pips": f"{pips:+.1f} pips",
+                "損益 ($)": f"${profit:+.2f}",
+                "決済理由": reason
+            })
+            st.session_state.current_position = None
 
-if st.session_state.current_position is None and auto_trade and signal != "NONE":
-    if signal == "BUY":
-        st.session_state.current_position = {
-            "type": "BUY",
-            "entry_price": current_price,
-            "sl_price": current_price - (stop_pips * pip_value),
-            "tp_price": recent_high,
-            "trailed": False
-        }
-    elif signal == "SELL":
-        st.session_state.current_position = {
-            "type": "SELL",
-            "entry_price": current_price,
-            "sl_price": current_price + (stop_pips * pip_value),
-            "tp_price": recent_low,
-            "trailed": False
-        }
+    if st.session_state.current_position is None and auto_trade and signal != "NONE":
+        if signal == "BUY":
+            st.session_state.current_position = {
+                "type": "BUY",
+                "entry_price": current_price,
+                "sl_price": current_price - (stop_pips * pip_value),
+                "tp_price": recent_high,
+                "trailed": False
+            }
+        elif signal == "SELL":
+            st.session_state.current_position = {
+                "type": "SELL",
+                "entry_price": current_price,
+                "sl_price": current_price + (stop_pips * pip_value),
+                "tp_price": recent_low,
+                "trailed": False
+            }
 
-k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("通貨ペア", pair_symbol.replace("=X", ""))
-k2.metric("現在価格", f"{current_price:.3f}" if "JPY" in pair_symbol else f"{current_price:.5f}")
-k3.metric("狙える値幅 (TP)", f"{buy_target_pips if 'Uptrend' in htf_trend else sell_target_pips} pips")
-k4.metric("自動売買", "稼働中" if auto_trade else "停止中")
-k5.metric("シグナル", signal)
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("通貨ペア", pair_symbol.replace("=X", ""))
+    k2.metric("現在価格", f"{current_price:.3f}" if "JPY" in pair_symbol else f"{current_price:.5f}")
+    k3.metric("狙える値幅 (TP)", f"{buy_target_pips if 'Uptrend' in htf_trend else sell_target_pips} pips")
+    k4.metric("自動売買", "稼働中" if auto_trade else "停止中")
+    k5.metric("シグナル", signal)
 
-st.markdown("---")
-
-col_chart, col_logic = st.columns([3.2, 1])
-time_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
-
-with col_logic:
-    st.subheader("🔍 条件チェック")
-    st.write("**1. 上位足トレンド**", "✅ クリア" if htf_pass else "❌ ミスマッチ")
-    st.write("**2. 直近高安ブレイク**", "✅ 発生" if breakout_pass else "⏳ 待機中")
-    st.write(f"**3. {min_pip_target}pips値幅**", "✅ 確保" if target_pass else "❌ 不足")
     st.markdown("---")
-    st.write("**ポジション状況**")
-    fmt = ".3f" if "JPY" in pair_symbol else ".5f"
-    
-    cur_pos = st.session_state.current_position
-    if cur_pos is not None:
-        st.success(f"⚡ **{cur_pos['type']} 保有中**\nエントリー: {cur_pos['entry_price']:{fmt}}")
-    elif signal != "NONE" and auto_trade:
-        st.success(f"⚡ **新規エントリー実行中**")
-    else:
-        planned = recent_5m_high if "Uptrend" in htf_trend else recent_5m_low
-        st.info(f"⏳ **ブレイク待機中**\n目標値: {planned:{fmt}}")
 
-with col_chart:
-    st.subheader(f"📈 5分足リアルタイムチャート ({pair_symbol.replace('=X', '')}) - 日本時間 (JST)")
-    
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df[time_col], open=df["Open"], high=df["High"],
-        low=df["Low"], close=df["Close"], name="価格",
-        increasing_line_color="#2e7d32", increasing_fillcolor="#4caf50",
-        decreasing_line_color="#c62828", decreasing_fillcolor="#ef5350"
-    ))
+    col_chart, col_logic = st.columns([3.2, 1])
+    time_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
 
-    if show_ema20:
-        fig.add_trace(go.Scatter(
-            x=df[time_col], y=df["EMA20"],
-            line=dict(color="#1565c0", width=2), name="EMA(20)"
-        ))
-
-    if show_trendlines:
-        fig.add_hline(y=recent_high, line_dash="dash", line_color="#ad1457", line_width=1.2, annotation_text="直近高値")
-        fig.add_hline(y=recent_low, line_dash="dash", line_color="#00838f", line_width=1.2, annotation_text="直近安値")
-
-    if show_rsi_band:
-        last_rsi = float(df["RSI"].iloc[-1])
-        if last_rsi >= 70:
-            fig.add_vrect(x0=df[time_col].iloc[-10], x1=df[time_col].iloc[-1],
-                          fillcolor="rgba(239, 83, 80, 0.15)", line_width=0,
-                          annotation_text="RSI 買われすぎ", annotation_position="top left")
-        elif last_rsi <= 30:
-            fig.add_vrect(x0=df[time_col].iloc[-10], x1=df[time_col].iloc[-1],
-                          fillcolor="rgba(76, 175, 80, 0.15)", line_width=0,
-                          annotation_text="RSI 売られすぎ", annotation_position="bottom left")
-
-    price_fmt = ".3f" if "JPY" in pair_symbol else ".5f"
-    
-    if show_trading_lines:
-        active_pos = st.session_state.current_position
-        if active_pos is not None:
-            fig.add_hline(y=active_pos["entry_price"], line_color="#0288d1", line_width=2, annotation_text=f"{active_pos['type']} ENTRY: {active_pos['entry_price']:{price_fmt}}")
-            fig.add_hline(y=active_pos["tp_price"], line_dash="longdash", line_color="#2e7d32", line_width=1.5, annotation_text="TP (利確)")
-            fig.add_hline(y=active_pos["sl_price"], line_dash="longdash", line_color="#c62828", line_width=1.5, annotation_text="SL (損切)")
+    with col_logic:
+        st.subheader("🔍 条件チェック")
+        st.write("**1. 上位足トレンド**", "✅ クリア" if htf_pass else "❌ ミスマッチ")
+        st.write("**2. 直近高安ブレイク**", "✅ 発生" if breakout_pass else "⏳ 待機中")
+        st.write(f"**3. {min_pip_target}pips値幅**", "✅ 確保" if target_pass else "❌ 不足")
+        st.markdown("---")
+        st.write("**ポジション状況**")
+        fmt = ".3f" if "JPY" in pair_symbol else ".5f"
+        
+        cur_pos = st.session_state.current_position
+        if cur_pos is not None:
+            st.success(f"⚡ **{cur_pos['type']} 保有中**\nエントリー: {cur_pos['entry_price']:{fmt}}")
+        elif signal != "NONE" and auto_trade:
+            st.success(f"⚡ **新規エントリー実行中**")
         else:
             planned = recent_5m_high if "Uptrend" in htf_trend else recent_5m_low
-            fig.add_hline(y=planned, line_dash="dashdot", line_color="#f57f17", line_width=1.5, annotation_text=f"PLANNED ENTRY: {planned:{price_fmt}}")
+            st.info(f"⏳ **ブレイク待機中**\n目標値: {planned:{fmt}}")
 
-    last_time = df[time_col].iloc[-1]
-    start_time_1d = last_time - timedelta(days=1)
+    with col_chart:
+        st.subheader(f"📈 5分足リアルタイムチャート ({pair_symbol.replace('=X', '')}) - 日本時間 (JST)")
+        
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=df[time_col], open=df["Open"], high=df["High"],
+            low=df["Low"], close=df["Close"], name="価格",
+            increasing_line_color="#2e7d32", increasing_fillcolor="#4caf50",
+            decreasing_line_color="#c62828", decreasing_fillcolor="#ef5350"
+        ))
 
-    fig.update_layout(
-        height=540,
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-        template="plotly_white",
-        paper_bgcolor="#fbf8f1",
-        plot_bgcolor="#fbf8f1",
-        font=dict(color="#3e3a36"),
-        yaxis=dict(title="Price", side="right", showgrid=True, gridcolor="#e8e2d5"),
-        xaxis=dict(
-            title="日本時間 (JST - 過去24時間)",
-            range=[start_time_1d, last_time],
-            showgrid=True,
-            gridcolor="#e8e2d5"
+        if show_ema20:
+            fig.add_trace(go.Scatter(
+                x=df[time_col], y=df["EMA20"],
+                line=dict(color="#1565c0", width=2), name="EMA(20)"
+            ))
+
+        if show_trendlines:
+            fig.add_hline(y=recent_high, line_dash="dash", line_color="#ad1457", line_width=1.2, annotation_text="直近高値")
+            fig.add_hline(y=recent_low, line_dash="dash", line_color="#00838f", line_width=1.2, annotation_text="直近安値")
+
+        if show_rsi_band:
+            last_rsi = float(df["RSI"].iloc[-1])
+            if last_rsi >= 70:
+                fig.add_vrect(x0=df[time_col].iloc[-10], x1=df[time_col].iloc[-1],
+                              fillcolor="rgba(239, 83, 80, 0.15)", line_width=0,
+                              annotation_text="RSI 買われすぎ", annotation_position="top left")
+            elif last_rsi <= 30:
+                fig.add_vrect(x0=df[time_col].iloc[-10], x1=df[time_col].iloc[-1],
+                              fillcolor="rgba(76, 175, 80, 0.15)", line_width=0,
+                              annotation_text="RSI 売られすぎ", annotation_position="bottom left")
+
+        price_fmt = ".3f" if "JPY" in pair_symbol else ".5f"
+        
+        if show_trading_lines:
+            active_pos = st.session_state.current_position
+            if active_pos is not None:
+                fig.add_hline(y=active_pos["entry_price"], line_color="#0288d1", line_width=2, annotation_text=f"{active_pos['type']} ENTRY: {active_pos['entry_price']:{price_fmt}}")
+                fig.add_hline(y=active_pos["tp_price"], line_dash="longdash", line_color="#2e7d32", line_width=1.5, annotation_text="TP (利確)")
+                fig.add_hline(y=active_pos["sl_price"], line_dash="longdash", line_color="#c62828", line_width=1.5, annotation_text="SL (損切)")
+            else:
+                planned = recent_5m_high if "Uptrend" in htf_trend else recent_5m_low
+                fig.add_hline(y=planned, line_dash="dashdot", line_color="#f57f17", line_width=1.5, annotation_text=f"PLANNED ENTRY: {planned:{price_fmt}}")
+
+        last_time = df[time_col].iloc[-1]
+        start_time_1d = last_time - timedelta(days=1)
+
+        fig.update_layout(
+            height=540,
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=10, b=10),
+            template="plotly_white",
+            paper_bgcolor="#fbf8f1",
+            plot_bgcolor="#fbf8f1",
+            font=dict(color="#3e3a36"),
+            yaxis=dict(title="Price", side="right", showgrid=True, gridcolor="#e8e2d5"),
+            xaxis=dict(
+                title="日本時間 (JST - 過去24時間)",
+                range=[start_time_1d, last_time],
+                showgrid=True,
+                gridcolor="#e8e2d5"
+            )
         )
-    )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-        config={"responsive": True, "displayModeBar": True, "scrollZoom": True}
-    )
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"responsive": True, "displayModeBar": True, "scrollZoom": True}
+        )
+
+# 部分再描画関数を実行
+render_live_dashboard()
 
 # ------------------------------------------------------------------------------
 # 6. 約定履歴テーブル
@@ -405,7 +408,7 @@ else:
     st.dataframe(pd.DataFrame(st.session_state.trade_history), use_container_width=True)
 
 # ------------------------------------------------------------------------------
-# 7. バックテスト機能 (割り込み制御・堅牢化対応)
+# 7. バックテスト機能
 # ------------------------------------------------------------------------------
 st.markdown("---")
 st.header("🧪 バックテスト・検証機能")
@@ -427,7 +430,6 @@ with st.form(key="backtest_form"):
     submit_backtest = st.form_submit_button("🚀 バックテストを実行する", use_container_width=True)
 
 if submit_backtest:
-    st.session_state.is_backtesting = True
     with st.spinner("過去データを取得して検証中..."):
         interval_setting = "1h" if bt_period in ["1y", "2y"] else "5m"
         try:
@@ -446,7 +448,6 @@ if submit_backtest:
                 bt_df[time_col_bt] = bt_df[time_col_bt].dt.tz_localize(None)
 
             if bt_df.empty or len(bt_df) < 30:
-                # フォールバック用モックデータ
                 periods = 500
                 base_p = 155.0 if "JPY" in pair_symbol else 1.085
                 times = [datetime.now() - timedelta(hours=i) for i in range(periods)][::-1]
@@ -600,12 +601,3 @@ if submit_backtest:
                 st.dataframe(res_df, use_container_width=True)
         except Exception as e:
             st.error(f"バックテスト処理中にエラーが発生しました: {e}")
-        finally:
-            st.session_state.is_backtesting = False
-
-# ------------------------------------------------------------------------------
-# 8. 自動更新ループ（バックテスト実行中はスキップ）
-# ------------------------------------------------------------------------------
-if live_update and not st.session_state.is_backtesting:
-    time.sleep(1)
-    st.rerun()
