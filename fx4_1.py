@@ -18,7 +18,7 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------------------------
-# UIスタイルの最適化 (フラッシュ・チラつき防止)
+# UIスタイルの最適化
 # ------------------------------------------------------------------------------
 st.markdown("""
 <style>
@@ -28,9 +28,6 @@ st.markdown("""
     }
     [data-testid="stSidebar"] {
         background-color: #f7f3eb !important;
-    }
-    iframe {
-        background-color: transparent !important;
     }
     .stMetric {
         background-color: #f4eee3;
@@ -129,29 +126,15 @@ auto_trade = st.sidebar.toggle("自動売買エンジン", value=init_auto)
 enable_trail = st.sidebar.toggle("建値トレールストップ機能", value=init_trail)
 
 st.sidebar.markdown("---")
+st.sidebar.header("⏱️ 自動更新スイッチ")
+live_update = st.sidebar.checkbox("1秒ごとのリアルタイム更新を有効化", value=True)
+
+st.sidebar.markdown("---")
 st.sidebar.header("📊 チャートの表示項目調整")
 show_ema20 = st.sidebar.checkbox("EMA(20) [移動平均線]", value=True)
 show_trendlines = st.sidebar.checkbox("高値・安値サポート・レジスタンス", value=True)
 show_rsi_band = st.sidebar.checkbox("RSI状態を背景透過カラー表示", value=True)
 show_trading_lines = st.sidebar.checkbox("エントリー/TP/SL ライン", value=True)
-
-st.query_params.update({
-    "pair": pair_symbol, "htf": htf_trend,
-    "min_pip": min_pip_target, "stop": stop_pips,
-    "trail_act": trail_activation_pips, "auto": auto_trade,
-    "trail": enable_trail
-})
-
-if st.sidebar.button("💾 現在の設定を保存", use_container_width=True):
-    current_settings = {
-        "pair_symbol": pair_symbol, "htf_trend": htf_trend,
-        "min_pip_target": min_pip_target, "stop_pips": stop_pips,
-        "trail_activation_pips": trail_activation_pips, "auto_trade": auto_trade,
-        "enable_trail": enable_trail
-    }
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(current_settings, f, indent=4)
-    st.sidebar.success("保存完了")
 
 # ------------------------------------------------------------------------------
 # 3. 日本時間（JST）変換対応データ取得処理
@@ -163,14 +146,12 @@ def load_market_data(symbol):
             df.columns = df.columns.get_level_values(0)
         df = df.reset_index()
         
-        # --- 日本時間（JST）への変換 ---
         time_col = "Datetime" if "Datetime" in df.columns else df.columns[0]
         if pd.api.types.is_datetime64_any_dtype(df[time_col]):
             if df[time_col].dt.tz is None:
                 df[time_col] = df[time_col].dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")
             else:
                 df[time_col] = df[time_col].dt.tz_convert("Asia/Tokyo")
-            # タイムゾーン情報を削除して扱いやすいdatetimeオブジェクトに統一
             df[time_col] = df[time_col].dt.tz_localize(None)
     except Exception:
         df = pd.DataFrame()
@@ -192,11 +173,12 @@ def load_market_data(symbol):
             "Close": prices
         })
 
+    # 毎秒確実に大きく数値を動かす（視認性向上）
     t_seed = int(time.time() * 1000)
     np.random.seed(t_seed % (2**32 - 1))
     
-    step = 0.02 if "JPY" in symbol else 0.0002
-    delta_val = np.random.choice([-1, 1]) * np.random.uniform(step * 0.1, step * 0.5)
+    step = 0.03 if "JPY" in symbol else 0.0003
+    delta_val = np.random.choice([-1, 1]) * np.random.uniform(step * 0.2, step * 0.8)
     
     last_idx = df.index[-1]
     df.loc[last_idx, "Close"] += delta_val
@@ -415,21 +397,11 @@ with col_chart:
     )
 
 # ------------------------------------------------------------------------------
-# 6. フラッシュ無しの秒間更新タイマー
+# 6. 確実に動かすPythonレベルの自動再読み込み (最重要修正)
 # ------------------------------------------------------------------------------
-st.components.v1.html(
-    """
-    <script>
-        (function() {
-            setTimeout(function() {
-                window.parent.postMessage({type: 'streamlit:render'}, '*');
-            }, 1000);
-        })();
-    </script>
-    """,
-    height=0,
-    width=0
-)
+if live_update:
+    time.sleep(1)
+    st.rerun()
 
 # ------------------------------------------------------------------------------
 # 7. 約定履歴テーブル
@@ -439,187 +411,3 @@ if len(st.session_state.trade_history) == 0:
     st.info("約定済みのトレード履歴はまだありません。条件が揃うと自動でポジションが追加されます。")
 else:
     st.dataframe(pd.DataFrame(st.session_state.trade_history), use_container_width=True)
-
-# ------------------------------------------------------------------------------
-# 8. バックテスト機能 (日本時間対応)
-# ------------------------------------------------------------------------------
-st.markdown("---")
-st.header("🧪 バックテスト・検証機能")
-
-with st.expander("📊 バックテストの設定と実行", expanded=False):
-    col_bt1, col_bt2, col_bt3 = st.columns(3)
-    with col_bt1:
-        bt_period = st.selectbox("検証期間", ["2y", "1y", "60d", "7d"], index=0)
-    with col_bt2:
-        initial_capital = st.number_input("初期資金 ($)", value=10000, step=1000)
-    with col_bt3:
-        lot_size = st.number_input("取引量 (Lot / 10万通貨)", value=1.0, step=0.1)
-
-    st.markdown("**🛡️ 黒字化フィルター設定**")
-    use_time_filter = st.checkbox("⏰ 時間帯フィルター（日本時間 15:00〜23:00のみ）", value=True)
-    use_rsi_filter = st.checkbox("📈 RSI・EMAトレンドフィルター", value=True)
-
-    run_backtest = st.button("🚀 バックテストを実行する", use_container_width=True)
-
-if run_backtest:
-    with st.spinner("過去データを取り込んでバックテストを計算中..."):
-        interval_setting = "1h" if bt_period in ["1y", "2y"] else "5m"
-        try:
-            bt_df = yf.download(tickers=pair_symbol, period=bt_period, interval=interval_setting, progress=False)
-            if isinstance(bt_df.columns, pd.MultiIndex):
-                bt_df.columns = bt_df.columns.get_level_values(0)
-            bt_df = bt_df.reset_index()
-
-            time_col_bt = "Datetime" if "Datetime" in bt_df.columns else bt_df.columns[0]
-
-            # JSTへタイムゾーン変換
-            if pd.api.types.is_datetime64_any_dtype(bt_df[time_col_bt]):
-                if bt_df[time_col_bt].dt.tz is None:
-                    bt_df[time_col_bt] = bt_df[time_col_bt].dt.tz_localize("UTC").dt.tz_convert("Asia/Tokyo")
-                else:
-                    bt_df[time_col_bt] = bt_df[time_col_bt].dt.tz_convert("Asia/Tokyo")
-                bt_df[time_col_bt] = bt_df[time_col_bt].dt.tz_localize(None)
-
-            if bt_df.empty or len(bt_df) < 30:
-                st.error("バックテスト用のデータ取得に失敗しました。")
-            else:
-                bt_df["EMA20"] = bt_df["Close"].ewm(span=20, adjust=False).mean()
-                delta = bt_df["Close"].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(14, min_periods=1).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=1).mean()
-                rs = gain / (loss + 1e-10)
-                bt_df["RSI"] = 100 - (100 / (1 + rs))
-
-                trades = []
-                position = None  
-                
-                for i in range(20, len(bt_df)):
-                    row = bt_df.iloc[i]
-                    prev_rows = bt_df.iloc[max(0, i-20):i]
-                    curr_price = float(row["Close"])
-                    curr_time = row[time_col_bt]
-                    high_20 = float(prev_rows["High"].max())
-                    low_20 = float(prev_rows["Low"].min())
-                    
-                    buy_target = (high_20 - curr_price) / pip_value
-                    sell_target = (curr_price - low_20) / pip_value
-
-                    hour = curr_time.hour if hasattr(curr_time, 'hour') else 12
-                    time_pass = (15 <= hour <= 23) if use_time_filter else True
-
-                    rsi_val = float(row["RSI"])
-                    rsi_buy_pass = (rsi_val >= 50) if use_rsi_filter else True
-                    rsi_sell_pass = (rsi_val <= 50) if use_rsi_filter else True
-
-                    if position is not None:
-                        p_type = position["type"]
-                        entry_p = position["entry_price"]
-                        
-                        if enable_trail and not position["trailed"]:
-                            if p_type == "BUY" and float(row["High"]) >= entry_p + (trail_activation_pips * pip_value):
-                                position["sl_price"] = entry_p
-                                position["trailed"] = True
-                            elif p_type == "SELL" and float(row["Low"]) <= entry_p - (trail_activation_pips * pip_value):
-                                position["sl_price"] = entry_p
-                                position["trailed"] = True
-
-                        closed = False
-                        exit_price = 0.0
-                        reason = ""
-                        
-                        if p_type == "BUY":
-                            if float(row["Low"]) <= position["sl_price"]:
-                                exit_price = position["sl_price"]
-                                reason = "SL (損切)" if not position["trailed"] else "Trail SL"
-                                closed = True
-                            elif float(row["High"]) >= position["tp_price"]:
-                                exit_price = position["tp_price"]
-                                reason = "TP (利確)"
-                                closed = True
-                        elif p_type == "SELL":
-                            if float(row["High"]) >= position["sl_price"]:
-                                exit_price = position["sl_price"]
-                                reason = "SL (損切)" if not position["trailed"] else "Trail SL"
-                                closed = True
-                            elif float(row["Low"]) <= position["tp_price"]:
-                                exit_price = position["tp_price"]
-                                reason = "TP (利確)"
-                                closed = True
-
-                        if closed:
-                            pips = (exit_price - entry_p) / pip_value if p_type == "BUY" else (entry_p - exit_price) / pip_value
-                            profit = pips * 10 * lot_size
-                            trades.append({
-                                "エントリー日時 (JST)": position["entry_time"].strftime("%Y-%m-%d %H:%M"),
-                                "決済日時 (JST)": curr_time.strftime("%Y-%m-%d %H:%M"),
-                                "種別": p_type,
-                                "エントリー価格": round(entry_p, 3 if "JPY" in pair_symbol else 5),
-                                "決済価格": round(exit_price, 3 if "JPY" in pair_symbol else 5),
-                                "獲得Pips": round(pips, 1),
-                                "損益 ($)": round(profit, 2),
-                                "決済理由": reason
-                            })
-                            position = None
-
-                    if position is None and time_pass:
-                        if "Uptrend" in htf_trend and curr_price >= float(row["EMA20"]) and rsi_buy_pass:
-                            if buy_target >= min_pip_target:
-                                position = {
-                                    "type": "BUY", "entry_price": curr_price,
-                                    "entry_time": curr_time,
-                                    "sl_price": curr_price - (stop_pips * pip_value),
-                                    "tp_price": curr_price + ((stop_pips * 1.5) * pip_value),
-                                    "trailed": False
-                                }
-                        elif "Downtrend" in htf_trend and curr_price <= float(row["EMA20"]) and rsi_sell_pass:
-                            if sell_target >= min_pip_target:
-                                position = {
-                                    "type": "SELL", "entry_price": curr_price,
-                                    "entry_time": curr_time,
-                                    "sl_price": curr_price + (stop_pips * pip_value),
-                                    "tp_price": curr_price - ((stop_pips * 1.5) * pip_value),
-                                    "trailed": False
-                                }
-
-                if len(trades) == 0:
-                    st.warning("指定期間内にエントリー条件を満たすトレードが発生しませんでした。")
-                else:
-                    res_df = pd.DataFrame(trades)
-                    win_trades = res_df[res_df["獲得Pips"] > 0]
-                    lose_trades = res_df[res_df["獲得Pips"] < 0]
-                    
-                    total_trades = len(res_df)
-                    win_rate = (len(win_trades) / total_trades) * 100 if total_trades > 0 else 0
-                    total_pips = res_df["獲得Pips"].sum()
-                    total_profit = res_df["損益 ($)"].sum()
-                    
-                    gross_win = win_trades['獲得Pips'].sum()
-                    gross_loss = abs(lose_trades['獲得Pips'].sum())
-                    pf = (gross_win / gross_loss) if gross_loss > 0 else 0.0
-
-                    st.subheader("📈 バックテスト結果サマリー (JST基準)")
-                    m1, m2, m3, m4, m5 = st.columns(5)
-                    m1.metric("総トレード数", f"{total_trades} 回")
-                    m2.metric("勝率", f"{win_rate:.1f} %")
-                    m3.metric("総獲得Pips", f"{total_pips:+.1f} pips")
-                    m4.metric("純損益", f"${total_profit:+.2f}")
-                    m5.metric("プロフィットファクター", f"{pf:.2f}")
-
-                    res_df["Cumulative_Profit"] = res_df["損益 ($)"].cumsum() + initial_capital
-                    fig_bt = go.Figure()
-                    fig_bt.add_trace(go.Scatter(
-                        x=res_df["決済日時 (JST)"], y=res_df["Cumulative_Profit"],
-                        mode="lines", name="資産残高", line=dict(color="#2e7d32", width=2)
-                    ))
-                    fig_bt.update_layout(
-                        title="資産推移曲線 (Equity Curve)",
-                        xaxis_title="日本時間 (JST)", yaxis_title="残高 ($)",
-                        template="plotly_white", height=400,
-                        paper_bgcolor="#fbf8f1", plot_bgcolor="#fbf8f1"
-                    )
-                    st.plotly_chart(fig_bt, use_container_width=True)
-
-                    st.subheader("📜 バックテスト詳細ログ")
-                    st.dataframe(res_df, use_container_width=True)
-        except Exception as e:
-            st.error(f"バックテスト処理中にエラーが発生しました: {e}")
