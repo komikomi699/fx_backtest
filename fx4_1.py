@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -11,7 +12,7 @@ import os
 # 1. ページ基本設定
 # ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="ドル円 EA (リアルタイム yfinance版)",
+    page_title="ドル円 EA (リアルタイム自動更新版)",
     page_icon="📈",
     layout="wide"
 )
@@ -70,6 +71,11 @@ if "current_position" not in st.session_state or "trade_history" not in st.sessi
 # ------------------------------------------------------------------------------
 # 3. サイドバー設定
 # ------------------------------------------------------------------------------
+st.sidebar.header("🔄 リアルタイム自動更新設定")
+live_update = st.sidebar.toggle("チャートリアルタイム自動更新", value=True)
+refresh_interval = st.sidebar.slider("更新間隔 (秒)", min_value=2, max_value=30, value=3)
+
+st.sidebar.markdown("---")
 st.sidebar.header("🌍 取引銘柄 & パラメータ")
 pair_symbol = "USD/JPY"
 pip_value = 0.01
@@ -110,11 +116,28 @@ if st.sidebar.button("🗑️ 取引履歴・ポジションを全リセット")
     st.rerun()
 
 # ------------------------------------------------------------------------------
-# 4. yfinance からリアルタイム市場データ取得
+# 4. JavaScriptによるリアルタイム自動更新タイマー
 # ------------------------------------------------------------------------------
-@st.cache_data(ttl=10)
+if live_update:
+    # JavaScript経由で指定した秒数ごとにページをリロードさせる
+    components.html(
+        f"""
+        <script>
+            setTimeout(function() {{
+                window.parent.postMessage({{type: 'streamlit:render'}, '*'});
+                window.parent.location.reload();
+            }}, {refresh_interval * 1000});
+        </script>
+        """,
+        height=0,
+        width=0
+    )
+
+# ------------------------------------------------------------------------------
+# 5. yfinance からリアルタイム市場データ取得 (キャッシュ無効化)
+# ------------------------------------------------------------------------------
 def fetch_real_usdjpy():
-    """yfinanceから正確なリアルタイムUSD/JPYデータを取得"""
+    """yfinanceから最新のリアルタイムUSD/JPYデータを取得"""
     try:
         ticker = yf.Ticker("JPY=X")
         df_5m = ticker.history(period="5d", interval="5m")
@@ -147,12 +170,9 @@ def fetch_real_usdjpy():
     return df_5m, sma200_val, time_col
 
 # ------------------------------------------------------------------------------
-# 5. メインダッシュボード
+# 6. メインダッシュボード
 # ------------------------------------------------------------------------------
-st.title("⚡ USD/JPY 自動売買 Dashboard (yfinance連動)")
-
-if st.button("🔄 最新データ更新", use_container_width=True):
-    st.rerun()
+st.title("⚡ USD/JPY 自動売買 Dashboard (リアルタイム稼働中)")
 
 df_5m, sma200_val, time_col = fetch_real_usdjpy()
 
@@ -326,7 +346,7 @@ chart_min = df_chart["Low"].min()
 padding = (chart_max - chart_min) * 0.15 if chart_max != chart_min else 0.10
 
 fig.update_layout(
-    title="🔍 リアルタイム 5分足チャート",
+    title=f"🔍 リアルタイム 5分足チャート (最終更新: {datetime.now().strftime('%H:%M:%S')})",
     height=500,
     xaxis_rangeslider_visible=False,
     template="plotly_white",
@@ -337,7 +357,7 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------------------------
-# 6. トレード履歴表示
+# 7. トレード履歴表示
 # ------------------------------------------------------------------------------
 st.subheader("📋 実行・決済ログ")
 if len(st.session_state.trade_history) == 0:
