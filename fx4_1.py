@@ -1,5 +1,4 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -12,7 +11,7 @@ import os
 # 1. ページ基本設定
 # ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="ドル円 EA (リアルタイム自動更新版)",
+    page_title="ドル円 EA (部分リアルタイム更新版)",
     page_icon="📈",
     layout="wide"
 )
@@ -71,9 +70,9 @@ if "current_position" not in st.session_state or "trade_history" not in st.sessi
 # ------------------------------------------------------------------------------
 # 3. サイドバー設定
 # ------------------------------------------------------------------------------
-st.sidebar.header("🔄 リアルタイム自動更新設定")
-live_update = st.sidebar.toggle("チャートリアルタイム自動更新", value=True)
-refresh_interval = st.sidebar.slider("更新間隔 (秒)", min_value=2, max_value=30, value=3)
+st.sidebar.header("🔄 リアルタイム設定")
+live_update = st.sidebar.toggle("部分自動更新を有効化", value=True)
+refresh_sec = st.sidebar.slider("更新間隔 (秒)", min_value=2, max_value=30, value=3)
 
 st.sidebar.markdown("---")
 st.sidebar.header("🌍 取引銘柄 & パラメータ")
@@ -116,24 +115,7 @@ if st.sidebar.button("🗑️ 取引履歴・ポジションを全リセット")
     st.rerun()
 
 # ------------------------------------------------------------------------------
-# 4. JavaScriptによるリアルタイム自動更新タイマー
-# ------------------------------------------------------------------------------
-if live_update:
-    components.html(
-        f"""
-        <script>
-            setTimeout(function() {{
-                window.parent.postMessage({{'type': 'streamlit:render'}}, '*');
-                window.parent.location.reload();
-            }}, {refresh_interval * 1000});
-        </script>
-        """,
-        height=0,
-        width=0
-    )
-
-# ------------------------------------------------------------------------------
-# 5. yfinance からリアルタイム市場データ取得
+# 4. yfinance からリアルタイム市場データ取得
 # ------------------------------------------------------------------------------
 def fetch_real_usdjpy():
     """yfinanceから最新のリアルタイムUSD/JPYデータを取得"""
@@ -169,198 +151,204 @@ def fetch_real_usdjpy():
     return df_5m, sma200_val, time_col
 
 # ------------------------------------------------------------------------------
-# 6. メインダッシュボード
+# 5. メインダッシュボード (Fragmentによるリロードなし部分更新)
 # ------------------------------------------------------------------------------
-st.title("⚡ USD/JPY 自動売買 Dashboard (リアルタイム稼働中)")
+st.title("⚡ USD/JPY 自動売買 Dashboard")
 
-df_5m, sma200_val, time_col = fetch_real_usdjpy()
+# run_every を設定することで、ページ全体のリロードなしでこの関数内だけがバックグラウンド更新される
+@st.fragment(run_every=refresh_sec if live_update else None)
+def render_dashboard():
+    df_5m, sma200_val, time_col = fetch_real_usdjpy()
 
-current_price = float(df_5m["Close"].iloc[-1])
-current_time_dt = df_5m[time_col].iloc[-1]
-current_time_str = current_time_dt.strftime("%Y-%m-%d %H:%M:%S")
-current_hour = current_time_dt.hour
+    current_price = float(df_5m["Close"].iloc[-1])
+    current_time_dt = df_5m[time_col].iloc[-1]
+    current_time_str = current_time_dt.strftime("%Y-%m-%d %H:%M:%S")
+    current_hour = current_time_dt.hour
 
-lookback = int(lookback_bars)
-recent_high = float(df_5m["High"].iloc[-(lookback+1):-1].max()) if len(df_5m) > lookback else current_price + 0.1
-recent_low = float(df_5m["Low"].iloc[-(lookback+1):-1].min()) if len(df_5m) > lookback else current_price - 0.1
-current_atr_pips = float(df_5m["ATR"].iloc[-1] / pip_value) if not pd.isna(df_5m["ATR"].iloc[-1]) else 5.0
-current_mom = float(df_5m["Momentum_3"].iloc[-1] / pip_value) if not pd.isna(df_5m["Momentum_3"].iloc[-1]) else 0.0
+    lookback = int(lookback_bars)
+    recent_high = float(df_5m["High"].iloc[-(lookback+1):-1].max()) if len(df_5m) > lookback else current_price + 0.1
+    recent_low = float(df_5m["Low"].iloc[-(lookback+1):-1].min()) if len(df_5m) > lookback else current_price - 0.1
+    current_atr_pips = float(df_5m["ATR"].iloc[-1] / pip_value) if not pd.isna(df_5m["ATR"].iloc[-1]) else 5.0
+    current_mom = float(df_5m["Momentum_3"].iloc[-1] / pip_value) if not pd.isna(df_5m["Momentum_3"].iloc[-1]) else 0.0
 
-# シグナル判定
-long_trend = "UP" if current_price >= sma200_val else "DOWN"
-time_ok = (start_hour <= current_hour <= end_hour) if enable_time_filter else True
-atr_ok = (current_atr_pips >= min_atr_pips) if enable_atr_filter else True
+    # シグナル判定
+    long_trend = "UP" if current_price >= sma200_val else "DOWN"
+    time_ok = (start_hour <= current_hour <= end_hour) if enable_time_filter else True
+    atr_ok = (current_atr_pips >= min_atr_pips) if enable_atr_filter else True
 
-breakout_buy = current_price > recent_high
-breakout_sell = current_price < recent_low
+    breakout_buy = current_price > recent_high
+    breakout_sell = current_price < recent_low
 
-signal = "NONE"
-if time_ok and atr_ok:
-    if long_trend == "UP" and breakout_buy:
-        signal = "BUY"
-    elif long_trend == "DOWN" and breakout_sell:
-        signal = "SELL"
+    signal = "NONE"
+    if time_ok and atr_ok:
+        if long_trend == "UP" and breakout_buy:
+            signal = "BUY"
+        elif long_trend == "DOWN" and breakout_sell:
+            signal = "SELL"
 
-# エントリー処理
-if st.session_state.current_position is None and auto_trade and signal != "NONE":
-    st.session_state.current_position = {
-        "type": signal,
-        "entry_price": current_price,
-        "entry_time": current_time_str,
-        "sl_price": current_price - (stop_pips * pip_value) if signal == "BUY" else current_price + (stop_pips * pip_value),
-        "tp_price": current_price + (tp_pips * pip_value) if signal == "BUY" else current_price - (tp_pips * pip_value),
-        "trailed": False
-    }
-    save_data()
-
-# 決済処理
-pos = st.session_state.current_position
-if pos is not None:
-    p_type = pos["type"]
-    entry_p = pos["entry_price"]
-    current_pips = (current_price - entry_p) / pip_value if p_type == "BUY" else (entry_p - current_price) / pip_value
-
-    if enable_trail and not pos["trailed"] and current_pips >= trail_activation_pips:
-        pos["sl_price"] = entry_p
-        pos["trailed"] = True
+    # エントリー処理
+    if st.session_state.current_position is None and auto_trade and signal != "NONE":
+        st.session_state.current_position = {
+            "type": signal,
+            "entry_price": current_price,
+            "entry_time": current_time_str,
+            "sl_price": current_price - (stop_pips * pip_value) if signal == "BUY" else current_price + (stop_pips * pip_value),
+            "tp_price": current_price + (tp_pips * pip_value) if signal == "BUY" else current_price - (tp_pips * pip_value),
+            "trailed": False
+        }
         save_data()
 
-    closed = False
-    exit_p = 0.0
-    reason = ""
+    # 決済処理
+    pos = st.session_state.current_position
+    if pos is not None:
+        p_type = pos["type"]
+        entry_p = pos["entry_price"]
+        current_pips = (current_price - entry_p) / pip_value if p_type == "BUY" else (entry_p - current_price) / pip_value
 
-    if p_type == "BUY":
-        if current_price <= pos["sl_price"]:
-            exit_p = pos["sl_price"]
-            reason = "SL (損切)" if not pos["trailed"] else "Trail (建値撤退)"
-            closed = True
-        elif current_price >= pos["tp_price"]:
-            exit_p = pos["tp_price"]
-            reason = "TP (目標利確)"
-            closed = True
-    elif p_type == "SELL":
-        if current_price >= pos["sl_price"]:
-            exit_p = pos["sl_price"]
-            reason = "SL (損切)" if not pos["trailed"] else "Trail (建値撤退)"
-            closed = True
-        elif current_price <= pos["tp_price"]:
-            exit_p = pos["tp_price"]
-            reason = "TP (目標利確)"
-            closed = True
+        if enable_trail and not pos["trailed"] and current_pips >= trail_activation_pips:
+            pos["sl_price"] = entry_p
+            pos["trailed"] = True
+            save_data()
 
-    if not closed and enable_early_tp and current_pips >= min_profit_pips_for_early_tp:
-        if (p_type == "BUY" and (current_mom < -1.5 or current_atr_pips < min_atr_pips * 0.8)) or \
-           (p_type == "SELL" and (current_mom > 1.5 or current_atr_pips < min_atr_pips * 0.8)):
-            exit_p = current_price
-            reason = "⚡ Early TP (失速早期利確)"
-            closed = True
+        closed = False
+        exit_p = 0.0
+        reason = ""
 
-    if closed:
-        final_pips = (exit_p - entry_p) / pip_value if p_type == "BUY" else (entry_p - exit_p) / pip_value
-        profit = round(final_pips * 10, 2)
-        st.session_state.trade_history.insert(0, {
-            "日時 (JST)": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "時間文字列": current_time_str,
-            "種別": p_type,
-            "エントリー価格": entry_p,
-            "決済価格": exit_p,
-            "獲得Pips": f"{final_pips:+.1f} pips",
-            "損益 ($)": f"${profit:+.2f}",
-            "理由": reason
-        })
-        st.session_state.current_position = None
-        save_data()
+        if p_type == "BUY":
+            if current_price <= pos["sl_price"]:
+                exit_p = pos["sl_price"]
+                reason = "SL (損切)" if not pos["trailed"] else "Trail (建値撤退)"
+                closed = True
+            elif current_price >= pos["tp_price"]:
+                exit_p = pos["tp_price"]
+                reason = "TP (目標利確)"
+                closed = True
+        elif p_type == "SELL":
+            if current_price >= pos["sl_price"]:
+                exit_p = pos["sl_price"]
+                reason = "SL (損切)" if not pos["trailed"] else "Trail (建値撤退)"
+                closed = True
+            elif current_price <= pos["tp_price"]:
+                exit_p = pos["tp_price"]
+                reason = "TP (目標利確)"
+                closed = True
 
-# メトリクス表示
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("リアル市場価格 USD/JPY", f"{current_price:.3f}")
-c2.metric("勢い (モメンタム)", f"{current_mom:+.1f} pips")
-c3.metric("時間帯フィルター", "OK 🟢" if time_ok else "対象外 🔴")
-c4.metric("エントリーシグナル", signal)
+        if not closed and enable_early_tp and current_pips >= min_profit_pips_for_early_tp:
+            if (p_type == "BUY" and (current_mom < -1.5 or current_atr_pips < min_atr_pips * 0.8)) or \
+               (p_type == "SELL" and (current_mom > 1.5 or current_atr_pips < min_atr_pips * 0.8)):
+                exit_p = current_price
+                reason = "⚡ Early TP (失速早期利確)"
+                closed = True
 
-st.markdown("---")
+        if closed:
+            final_pips = (exit_p - entry_p) / pip_value if p_type == "BUY" else (entry_p - exit_p) / pip_value
+            profit = round(final_pips * 10, 2)
+            st.session_state.trade_history.insert(0, {
+                "日時 (JST)": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "時間文字列": current_time_str,
+                "種別": p_type,
+                "エントリー価格": entry_p,
+                "決済価格": exit_p,
+                "獲得Pips": f"{final_pips:+.1f} pips",
+                "損益 ($)": f"${profit:+.2f}",
+                "理由": reason
+            })
+            st.session_state.current_position = None
+            save_data()
 
-# 保有ポジション情報
-st.subheader("📌 現在保有中のポジション")
-current_pos = st.session_state.current_position
-if current_pos is not None:
-    p_type = current_pos["type"]
-    e_price = current_pos["entry_price"]
-    live_pips = (current_price - e_price) / pip_value if p_type == "BUY" else (e_price - current_price) / pip_value
-    live_profit = live_pips * 10
+    # メトリクス表示
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("リアル市場価格 USD/JPY", f"{current_price:.3f}")
+    c2.metric("勢い (モメンタム)", f"{current_mom:+.1f} pips")
+    c3.metric("時間帯フィルター", "OK 🟢" if time_ok else "対象外 🔴")
+    c4.metric("エントリーシグナル", signal)
 
-    status_color = "🟢" if live_pips >= 0 else "🔴"
-    pips_str = f"{live_pips:+.1f} pips"
-    profit_str = f"${live_profit:+.2f}"
+    st.markdown("---")
 
-    p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
-    p_col1.metric("ポジション種別", "🔴 BUY (買)" if p_type == "BUY" else "🔵 SELL (売)")
-    p_col2.metric("エントリー価格", f"{e_price:.3f}")
-    p_col3.metric("現在値", f"{current_price:.3f}")
-    p_col4.metric("現在含み損益 (pips)", f"{status_color} {pips_str}")
-    p_col5.metric("現在含み損益 ($)", f"{status_color} {profit_str}")
+    # 保有ポジション情報
+    st.subheader("📌 現在保有中のポジション")
+    current_pos = st.session_state.current_position
+    if current_pos is not None:
+        p_type = current_pos["type"]
+        e_price = current_pos["entry_price"]
+        live_pips = (current_price - e_price) / pip_value if p_type == "BUY" else (e_price - current_price) / pip_value
+        live_profit = live_pips * 10
 
-    if st.button("🚨 今すぐ手動決済する", use_container_width=True):
-        profit = round(live_pips * 10, 2)
-        st.session_state.trade_history.insert(0, {
-            "日時 (JST)": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "時間文字列": current_time_str,
-            "種別": p_type,
-            "エントリー価格": e_price,
-            "決済価格": current_price,
-            "獲得Pips": f"{live_pips:+.1f} pips",
-            "損益 ($)": f"${profit:+.2f}",
-            "理由": "手動成り行き決済"
-        })
-        st.session_state.current_position = None
-        save_data()
-        st.rerun()
-else:
-    st.info("現在保有中のポジションはありません。")
+        status_color = "🟢" if live_pips >= 0 else "🔴"
+        pips_str = f"{live_pips:+.1f} pips"
+        profit_str = f"${live_profit:+.2f}"
 
-st.markdown("---")
+        p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
+        p_col1.metric("ポジション種別", "🔴 BUY (買)" if p_type == "BUY" else "🔵 SELL (売)")
+        p_col2.metric("エントリー価格", f"{e_price:.3f}")
+        p_col3.metric("現在値", f"{current_price:.3f}")
+        p_col4.metric("現在含み損益 (pips)", f"{status_color} {pips_str}")
+        p_col5.metric("現在含み損益 ($)", f"{status_color} {profit_str}")
 
-# チャート描写
-df_chart = df_5m.tail(72).copy()
-fig = go.Figure()
+        if st.button("🚨 今すぐ手動決済する", use_container_width=True):
+            profit = round(live_pips * 10, 2)
+            st.session_state.trade_history.insert(0, {
+                "日時 (JST)": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "時間文字列": current_time_str,
+                "種別": p_type,
+                "エントリー価格": e_price,
+                "決済価格": current_price,
+                "獲得Pips": f"{live_pips:+.1f} pips",
+                "損益 ($)": f"${profit:+.2f}",
+                "理由": "手動成り行き決済"
+            })
+            st.session_state.current_position = None
+            save_data()
+            st.rerun()
+    else:
+        st.info("現在保有中のポジションはありません。")
 
-fig.add_trace(go.Candlestick(
-    x=df_chart[time_col], open=df_chart["Open"], high=df_chart["High"],
-    low=df_chart["Low"], close=df_chart["Close"], name="USD/JPY 5分足"
-))
-fig.add_trace(go.Scatter(
-    x=df_chart[time_col], y=df_chart["EMA20"],
-    line=dict(color="#1976d2", width=1.5), name="20EMA"
-))
+    st.markdown("---")
 
-# 保有ポジション
-if current_pos is not None:
-    p_color = "#e53935" if current_pos["type"] == "BUY" else "#1e88e5"
-    fig.add_hline(y=current_pos["entry_price"], line_color=p_color, line_width=2, annotation_text="ENTRY")
-    fig.add_hline(y=current_pos["tp_price"], line_dash="dashdot", line_color="#2e7d32", annotation_text="TP (目標)")
-    fig.add_hline(y=current_pos["sl_price"], line_dash="dashdot", line_color="#c62828", annotation_text="SL (損切)")
+    # チャート描写
+    df_chart = df_5m.tail(72).copy()
+    fig = go.Figure()
 
-chart_max = df_chart["High"].max()
-chart_min = df_chart["Low"].min()
-padding = (chart_max - chart_min) * 0.15 if chart_max != chart_min else 0.10
+    fig.add_trace(go.Candlestick(
+        x=df_chart[time_col], open=df_chart["Open"], high=df_chart["High"],
+        low=df_chart["Low"], close=df_chart["Close"], name="USD/JPY 5分足"
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_chart[time_col], y=df_chart["EMA20"],
+        line=dict(color="#1976d2", width=1.5), name="20EMA"
+    ))
 
-fig.update_layout(
-    title=f"🔍 リアルタイム 5分足チャート (最終更新: {datetime.now().strftime('%H:%M:%S')})",
-    height=500,
-    xaxis_rangeslider_visible=False,
-    template="plotly_white",
-    margin=dict(l=10, r=10, t=40, b=10),
-    yaxis=dict(side="right", range=[chart_min - padding, chart_max + padding])
-)
+    # 保有ポジション
+    if current_pos is not None:
+        p_color = "#e53935" if current_pos["type"] == "BUY" else "#1e88e5"
+        fig.add_hline(y=current_pos["entry_price"], line_color=p_color, line_width=2, annotation_text="ENTRY")
+        fig.add_hline(y=current_pos["tp_price"], line_dash="dashdot", line_color="#2e7d32", annotation_text="TP (目標)")
+        fig.add_hline(y=current_pos["sl_price"], line_dash="dashdot", line_color="#c62828", annotation_text="SL (損切)")
 
-st.plotly_chart(fig, use_container_width=True)
+    chart_max = df_chart["High"].max()
+    chart_min = df_chart["Low"].min()
+    padding = (chart_max - chart_min) * 0.15 if chart_max != chart_min else 0.10
 
-# ------------------------------------------------------------------------------
-# 7. トレード履歴表示
-# ------------------------------------------------------------------------------
-st.subheader("📋 実行・決済ログ")
-if len(st.session_state.trade_history) == 0:
-    st.info("約定済みのトレードはまだありません。")
-else:
-    disp_df = pd.DataFrame(st.session_state.trade_history).drop(columns=["時間文字列"], errors="ignore")
-    st.dataframe(disp_df, use_container_width=True)
+    fig.update_layout(
+        title=f"🔍 リアルタイム 5分足チャート (データ更新: {datetime.now().strftime('%H:%M:%S')})",
+        height=500,
+        xaxis_rangeslider_visible=False,
+        template="plotly_white",
+        margin=dict(l=10, r=10, t=40, b=10),
+        yaxis=dict(side="right", range=[chart_min - padding, chart_max + padding])
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # --------------------------------------------------------------------------
+    # 6. トレード履歴表示
+    # --------------------------------------------------------------------------
+    st.subheader("📋 実行・決済ログ")
+    if len(st.session_state.trade_history) == 0:
+        st.info("約定済みのトレードはまだありません。")
+    else:
+        disp_df = pd.DataFrame(st.session_state.trade_history).drop(columns=["時間文字列"], errors="ignore")
+        st.dataframe(disp_df, use_container_width=True)
+
+# ダッシュボード関数を実行
+render_dashboard()
