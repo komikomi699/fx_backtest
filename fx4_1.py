@@ -8,12 +8,13 @@ import json
 import os
 
 # ------------------------------------------------------------------------------
-# 1. ページ基本設定
+# 1. ページ基本設定（スマホ表示最適化）
 # ------------------------------------------------------------------------------
 st.set_page_config(
-    page_title="ドル円 EA (正確データ＆設定保存版)",
+    page_title="ドル円 EA Dashboard",
     page_icon="📈",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"  # スマホ閲覧時は初期状態でサイドバーを閉じる
 )
 
 st.markdown("""
@@ -25,17 +26,24 @@ st.markdown("""
     [data-testid="stSidebar"] {
         background-color: #f4f1ea !important;
     }
+    /* モバイル向けカードUI調整 */
     .stMetric {
         background-color: #ede8df;
-        padding: 10px;
-        border-radius: 6px;
+        padding: 8px 12px;
+        border-radius: 8px;
+        margin-bottom: 8px;
+    }
+    div[data-testid="metric-container"] > label {
+        font-size: 0.85rem !important;
+    }
+    div[data-testid="metric-container"] > div {
+        font-size: 1.2rem !important;
     }
 </style>
 """, unsafe_allow_html=True)
 
 DATA_FILE = "trade_data.json"
 
-# デフォルト設定値
 DEFAULT_CONFIG = {
     "enable_early_tp": True,
     "min_profit_pips_for_early_tp": 3.0,
@@ -54,7 +62,7 @@ DEFAULT_CONFIG = {
 }
 
 # ------------------------------------------------------------------------------
-# 2. データの永続化（設定・ポジション・履歴のJSON保存/読み込み）
+# 2. データの永続化処理（設定・ポジション・履歴の保存・復元）
 # ------------------------------------------------------------------------------
 def load_all_data():
     if os.path.exists(DATA_FILE):
@@ -104,7 +112,7 @@ if "initialized" not in st.session_state:
     st.session_state.initialized = True
 
 # ------------------------------------------------------------------------------
-# 3. サイドバー設定
+# 3. サイドバー設定 (設定変更時に自動保存)
 # ------------------------------------------------------------------------------
 st.sidebar.header("🌍 取引銘柄 & パラメータ")
 pair_symbol = "USD/JPY"
@@ -117,18 +125,18 @@ min_profit_pips_for_early_tp = st.sidebar.number_input("早期利確の最低含
 
 st.sidebar.markdown("---")
 st.sidebar.header("🎯 フィルター設定")
-enable_time_filter = st.sidebar.toggle("時間帯フィルター (指定時間限定)", key="enable_time_filter", on_change=save_all_data)
-start_hour = st.sidebar.slider("取引開始時間 (JST)", 0, 23, key="start_hour", on_change=save_all_data)
-end_hour = st.sidebar.slider("取引終了時間 (JST)", 0, 23, key="end_hour", on_change=save_all_data)
+enable_time_filter = st.sidebar.toggle("時間帯フィルター", key="enable_time_filter", on_change=save_all_data)
+start_hour = st.sidebar.slider("開始時間 (JST)", 0, 23, key="start_hour", on_change=save_all_data)
+end_hour = st.sidebar.slider("終了時間 (JST)", 0, 23, key="end_hour", on_change=save_all_data)
 
 lookback_bars = st.sidebar.number_input("水平線参照本数 (5分足)", step=4, key="lookback_bars", on_change=save_all_data)
-enable_atr_filter = st.sidebar.toggle("ATRボラティリティフィルター", key="enable_atr_filter", on_change=save_all_data)
-min_atr_pips = st.sidebar.number_input("エントリー必要最小ATR (pips)", step=0.5, key="min_atr_pips", on_change=save_all_data)
+enable_atr_filter = st.sidebar.toggle("ATRフィルター", key="enable_atr_filter", on_change=save_all_data)
+min_atr_pips = st.sidebar.number_input("最小ATR (pips)", step=0.5, key="min_atr_pips", on_change=save_all_data)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ エントリー・利確・損切設定")
+st.sidebar.header("⚙️ エントリー・SL/TP設定")
 stop_pips = st.sidebar.number_input("損切り幅 (SL pips)", step=1.0, key="stop_pips", on_change=save_all_data)
-rr_ratio = st.sidebar.slider("通常目標リスクリワード比率 (TP倍率)", 1.0, 3.0, step=0.1, key="rr_ratio", on_change=save_all_data)
+rr_ratio = st.sidebar.slider("通常目標リスクリワード比率", 1.0, 3.0, step=0.1, key="rr_ratio", on_change=save_all_data)
 tp_pips = stop_pips * rr_ratio
 
 enable_trail = st.sidebar.toggle("建値トレールストップ機能", key="enable_trail", on_change=save_all_data)
@@ -137,28 +145,25 @@ trail_activation_pips = st.sidebar.number_input("トレール発動幅 (pips)", 
 st.sidebar.markdown("---")
 st.sidebar.header("🤖 自動売買設定")
 auto_trade = st.sidebar.toggle("自動売買エンジン稼働", key="auto_trade", on_change=save_all_data)
-live_update = st.sidebar.checkbox("リアルタイム更新", key="live_update", on_change=save_all_data)
+live_update = st.sidebar.checkbox("自動更新 (5秒)", key="live_update", on_change=save_all_data)
 
-if st.sidebar.button("🗑️ 設定・履歴を全リセット"):
+if st.sidebar.button("🗑️ 設定・履歴を全リセット", use_container_width=True):
     if os.path.exists(DATA_FILE):
         os.remove(DATA_FILE)
     st.session_state.clear()
-    st.sidebar.success("初期状態にリセットしました")
+    st.sidebar.success("初期化が完了しました")
     st.rerun()
 
 # ------------------------------------------------------------------------------
-# 4. 実際のドル円（USDJPY=X）リアルタイムデータ取得
+# 4. 正確な市場レートデータの取得処理
 # ------------------------------------------------------------------------------
 def fetch_real_usdjpy():
-    """実際のドル円市場価格と5分足データを確実に取得"""
     ticker = yf.Ticker("JPY=X")
     df_5m = ticker.history(period="5d", interval="5m")
     
     if df_5m.empty:
-        # 代替処理（APIエラー時の安全策）
         now_jst = datetime.now()
-        times = [now_jst]
-        df_5m = pd.DataFrame({"Open": [155.0], "High": [155.0], "Low": [155.0], "Close": [155.0]}, index=times)
+        df_5m = pd.DataFrame({"Open": [155.0], "High": [155.0], "Low": [155.0], "Close": [155.0]}, index=[now_jst])
     
     df_5m = df_5m.reset_index()
     time_col = "Datetime" if "Datetime" in df_5m.columns else "Date"
@@ -177,9 +182,9 @@ def fetch_real_usdjpy():
     return df_5m, sma200_val, time_col
 
 # ------------------------------------------------------------------------------
-# 5. メインダッシュボード
+# 5. メインダッシュボード (スマホ最適化)
 # ------------------------------------------------------------------------------
-st.title("⚡ USD/JPY 自動売買 (市場データ正確同期版)")
+st.title("📈 USD/JPY モバイルEA")
 
 @st.fragment(run_every=5 if live_update else None)
 def main_dashboard():
@@ -281,17 +286,19 @@ def main_dashboard():
             st.session_state.current_position = None
             save_all_data()
 
-    # メトリクス表示
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("USD/JPY リアル市場価格", f"{current_price:.3f}")
-    c2.metric("勢い (モメンタム)", f"{current_mom:+.1f} pips")
-    c3.metric("時間帯フィルター", "OK 🟢" if time_ok else "対象外 🔴")
-    c4.metric("エントリーシグナル", signal)
+    # スマホ向け2列配置メトリクス
+    m1, m2 = st.columns(2)
+    m1.metric("リアル市場価格", f"{current_price:.3f}")
+    m2.metric("シグナル", signal)
+
+    m3, m4 = st.columns(2)
+    m3.metric("モメンタム", f"{current_mom:+.1f} pips")
+    m4.metric("時間帯フィルター", "OK 🟢" if time_ok else "対象外 🔴")
 
     st.markdown("---")
 
-    # ポジション状態表示
-    st.subheader("📌 現在保有中のポジション (保存維持)")
+    # 現在保有中のポジション
+    st.subheader("📌 保有ポジション")
     current_pos = st.session_state.current_position
     if current_pos is not None:
         p_type = current_pos["type"]
@@ -300,15 +307,14 @@ def main_dashboard():
         live_profit = live_pips * 10
 
         status_color = "🟢" if live_pips >= 0 else "🔴"
-        pips_str = f"{live_pips:+.1f} pips"
-        profit_str = f"${live_profit:+.2f}"
+        
+        pos_col1, pos_col2 = st.columns(2)
+        pos_col1.metric("種別", "🔴 BUY (買)" if p_type == "BUY" else "🔵 SELL (売)")
+        pos_col2.metric("エントリー価格", f"{e_price:.3f}")
 
-        p_col1, p_col2, p_col3, p_col4, p_col5 = st.columns(5)
-        p_col1.metric("種別", "🔴 BUY (買)" if p_type == "BUY" else "🔵 SELL (売)")
-        p_col2.metric("エントリー価格", f"{e_price:.3f}")
-        p_col3.metric("現在値", f"{current_price:.3f}")
-        p_col4.metric("現在含み損益 (pips)", f"{status_color} {pips_str}")
-        p_col5.metric("現在含み損益 ($)", f"{status_color} {profit_str}")
+        pos_col3, pos_col4 = st.columns(2)
+        pos_col3.metric("現在損益 (pips)", f"{status_color} {live_pips:+.1f}")
+        pos_col4.metric("現在損益 ($)", f"{status_color} ${live_profit:+.2f}")
 
         if st.button("🚨 今すぐ手動決済する", use_container_width=True):
             profit = round(live_pips * 10, 2)
@@ -330,31 +336,31 @@ def main_dashboard():
 
     st.markdown("---")
 
-    # 6時間拡大チャート
-    df_chart = df_5m.tail(72).copy()
+    # スマホに最適化したチャート表示
+    df_chart = df_5m.tail(60).copy()
 
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
         x=df_chart[time_col], open=df_chart["Open"], high=df_chart["High"],
-        low=df_chart["Low"], close=df_chart["Close"], name="USD/JPY 5分足"
+        low=df_chart["Low"], close=df_chart["Close"], name="USD/JPY"
     ))
     fig.add_trace(go.Scatter(
         x=df_chart[time_col], y=df_chart["EMA20"],
         line=dict(color="#1976d2", width=1.5), name="20EMA"
     ))
 
-    # ブレイクアウト線（マーカー）
+    # ブレイクアウト予定位置
     fig.add_trace(go.Scatter(
         x=[df_chart[time_col].iloc[-1]], y=[recent_high],
         mode="markers+text",
-        marker=dict(symbol="triangle-up-open", size=16, color="#e53935", line=dict(width=2)),
+        marker=dict(symbol="triangle-up-open", size=14, color="#e53935", line=dict(width=2)),
         text=[" 買予定"], textposition="top right", name="買い予定 (赤)"
     ))
     fig.add_trace(go.Scatter(
         x=[df_chart[time_col].iloc[-1]], y=[recent_low],
         mode="markers+text",
-        marker=dict(symbol="triangle-down-open", size=16, color="#1e88e5", line=dict(width=2)),
+        marker=dict(symbol="triangle-down-open", size=14, color="#1e88e5", line=dict(width=2)),
         text=[" 売予定"], textposition="bottom right", name="売り予定 (青)"
     ))
 
@@ -366,7 +372,7 @@ def main_dashboard():
         fig.add_trace(go.Scatter(
             x=[pos_time], y=[current_pos["entry_price"]],
             mode="markers+text",
-            marker=dict(symbol=p_symbol, size=18, color=p_color),
+            marker=dict(symbol=p_symbol, size=16, color=p_color),
             text=[f" 保有中 {current_pos['type']}"],
             textposition="top center" if current_pos["type"] == "BUY" else "bottom center",
             name="保有ポジション"
@@ -381,12 +387,12 @@ def main_dashboard():
     padding = (chart_max - chart_min) * 0.15 if chart_max != chart_min else 0.10
 
     fig.update_layout(
-        title="🔍 6時間リアルマーケットチャート",
-        height=550,
+        height=400,
         xaxis_rangeslider_visible=False,
         template="plotly_white",
-        margin=dict(l=10, r=10, t=40, b=10),
-        yaxis=dict(side="right", range=[chart_min - padding, chart_max + padding])
+        margin=dict(l=5, r=5, t=25, b=5),
+        yaxis=dict(side="right", range=[chart_min - padding, chart_max + padding]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -396,9 +402,9 @@ main_dashboard()
 # ------------------------------------------------------------------------------
 # 6. トレード履歴表示
 # ------------------------------------------------------------------------------
-st.subheader("📋 実行・決済ログ (保存維持)")
+st.subheader("📋 実行・決済ログ")
 if len(st.session_state.trade_history) == 0:
-    st.info("約定済みのトレードはまだありません。")
+    st.info("約定済みのトレード履歴はありません。")
 else:
     disp_df = pd.DataFrame(st.session_state.trade_history).drop(columns=["時間文字列"], errors="ignore")
     st.dataframe(disp_df, use_container_width=True)
