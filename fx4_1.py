@@ -119,12 +119,11 @@ if st.sidebar.button("🗑️ 取引履歴・ポジションを全リセット")
 # 4. JavaScriptによるリアルタイム自動更新タイマー
 # ------------------------------------------------------------------------------
 if live_update:
-    # JavaScript経由で指定した秒数ごとにページをリロードさせる
     components.html(
         f"""
         <script>
             setTimeout(function() {{
-                window.parent.postMessage({{type: 'streamlit:render'}, '*'});
+                window.parent.postMessage({{'type': 'streamlit:render'}}, '*');
                 window.parent.location.reload();
             }}, {refresh_interval * 1000});
         </script>
@@ -134,7 +133,7 @@ if live_update:
     )
 
 # ------------------------------------------------------------------------------
-# 5. yfinance からリアルタイム市場データ取得 (キャッシュ無効化)
+# 5. yfinance からリアルタイム市場データ取得
 # ------------------------------------------------------------------------------
 def fetch_real_usdjpy():
     """yfinanceから最新のリアルタイムUSD/JPYデータを取得"""
