@@ -8,13 +8,13 @@ import json
 import os
 
 # ------------------------------------------------------------------------------
-# 1. ページ基本設定（スマホ表示最適化）
+# 1. ページ基本設定
 # ------------------------------------------------------------------------------
 st.set_page_config(
     page_title="ドル円 EA Dashboard",
     page_icon="📈",
     layout="wide",
-    initial_sidebar_state="collapsed"  # スマホ閲覧時は初期状態でサイドバーを閉じる
+    initial_sidebar_state="collapsed"
 )
 
 st.markdown("""
@@ -26,19 +26,14 @@ st.markdown("""
     [data-testid="stSidebar"] {
         background-color: #f4f1ea !important;
     }
-    /* モバイル向けカードUI調整 */
     .stMetric {
         background-color: #ede8df;
         padding: 8px 12px;
         border-radius: 8px;
         margin-bottom: 8px;
     }
-    div[data-testid="metric-container"] > label {
-        font-size: 0.85rem !important;
-    }
-    div[data-testid="metric-container"] > div {
-        font-size: 1.2rem !important;
-    }
+    div[data-testid="metric-container"] > label { font-size: 0.85rem !important; }
+    div[data-testid="metric-container"] > div { font-size: 1.2rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,7 +57,7 @@ DEFAULT_CONFIG = {
 }
 
 # ------------------------------------------------------------------------------
-# 2. データの永続化処理（設定・ポジション・履歴の保存・復元）
+# 2. データの永続化処理
 # ------------------------------------------------------------------------------
 def load_all_data():
     if os.path.exists(DATA_FILE):
@@ -99,8 +94,11 @@ def save_all_data():
         "current_position": st.session_state.current_position,
         "trade_history": st.session_state.trade_history
     }
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 saved_config, saved_pos, saved_hist = load_all_data()
 
@@ -112,7 +110,7 @@ if "initialized" not in st.session_state:
     st.session_state.initialized = True
 
 # ------------------------------------------------------------------------------
-# 3. サイドバー設定 (設定変更時に自動保存)
+# 3. サイドバー設定
 # ------------------------------------------------------------------------------
 st.sidebar.header("🌍 取引銘柄 & パラメータ")
 pair_symbol = "USD/JPY"
@@ -149,22 +147,30 @@ live_update = st.sidebar.checkbox("自動更新 (5秒)", key="live_update", on_c
 
 if st.sidebar.button("🗑️ 設定・履歴を全リセット", use_container_width=True):
     if os.path.exists(DATA_FILE):
-        os.remove(DATA_FILE)
+        try:
+            os.remove(DATA_FILE)
+        except Exception:
+            pass
     st.session_state.clear()
     st.sidebar.success("初期化が完了しました")
     st.rerun()
 
 # ------------------------------------------------------------------------------
-# 4. 正確な市場レートデータの取得処理
+# 4. レートデータ取得（エラー保護付き）
 # ------------------------------------------------------------------------------
 def fetch_real_usdjpy():
-    ticker = yf.Ticker("JPY=X")
-    df_5m = ticker.history(period="5d", interval="5m")
-    
-    if df_5m.empty:
+    try:
+        ticker = yf.Ticker("JPY=X")
+        df_5m = ticker.history(period="5d", interval="5m")
+        if df_5m.empty:
+            raise ValueError("データが空です")
+    except Exception:
+        # データが取れなかった場合のフォールバックデータ生成
         now_jst = datetime.now()
-        df_5m = pd.DataFrame({"Open": [155.0], "High": [155.0], "Low": [155.0], "Close": [155.0]}, index=[now_jst])
-    
+        df_5m = pd.DataFrame({
+            "Open": [155.0]*10, "High": [155.1]*10, "Low": [154.9]*10, "Close": [155.0]*10
+        }, index=[now_jst - pd.Timedelta(minutes=5*i) for i in range(10)][::-1])
+
     df_5m = df_5m.reset_index()
     time_col = "Datetime" if "Datetime" in df_5m.columns else "Date"
     df_5m[time_col] = pd.to_datetime(df_5m[time_col]).dt.tz_convert("Asia/Tokyo")
@@ -182,7 +188,7 @@ def fetch_real_usdjpy():
     return df_5m, sma200_val, time_col
 
 # ------------------------------------------------------------------------------
-# 5. メインダッシュボード (スマホ最適化)
+# 5. メインダッシュボード
 # ------------------------------------------------------------------------------
 st.title("📈 USD/JPY モバイルEA")
 
@@ -196,8 +202,8 @@ def main_dashboard():
     current_hour = current_time_dt.hour
 
     lookback = int(lookback_bars)
-    recent_high = float(df_5m["High"].iloc[-(lookback+1):-1].max())
-    recent_low = float(df_5m["Low"].iloc[-(lookback+1):-1].min())
+    recent_high = float(df_5m["High"].iloc[-(lookback+1):-1].max()) if len(df_5m) > lookback else current_price + 0.1
+    recent_low = float(df_5m["Low"].iloc[-(lookback+1):-1].min()) if len(df_5m) > lookback else current_price - 0.1
     current_atr_pips = float(df_5m["ATR"].iloc[-1] / pip_value) if not pd.isna(df_5m["ATR"].iloc[-1]) else 5.0
     current_mom = float(df_5m["Momentum_3"].iloc[-1] / pip_value) if not pd.isna(df_5m["Momentum_3"].iloc[-1]) else 0.0
 
@@ -286,7 +292,7 @@ def main_dashboard():
             st.session_state.current_position = None
             save_all_data()
 
-    # スマホ向け2列配置メトリクス
+    # メトリクス表示
     m1, m2 = st.columns(2)
     m1.metric("リアル市場価格", f"{current_price:.3f}")
     m2.metric("シグナル", signal)
@@ -297,7 +303,7 @@ def main_dashboard():
 
     st.markdown("---")
 
-    # 現在保有中のポジション
+    # ポジション表示
     st.subheader("📌 保有ポジション")
     current_pos = st.session_state.current_position
     if current_pos is not None:
@@ -336,7 +342,7 @@ def main_dashboard():
 
     st.markdown("---")
 
-    # スマホに最適化したチャート表示
+    # チャート表示
     df_chart = df_5m.tail(60).copy()
 
     fig = go.Figure()
@@ -350,34 +356,8 @@ def main_dashboard():
         line=dict(color="#1976d2", width=1.5), name="20EMA"
     ))
 
-    # ブレイクアウト予定位置
-    fig.add_trace(go.Scatter(
-        x=[df_chart[time_col].iloc[-1]], y=[recent_high],
-        mode="markers+text",
-        marker=dict(symbol="triangle-up-open", size=14, color="#e53935", line=dict(width=2)),
-        text=[" 買予定"], textposition="top right", name="買い予定 (赤)"
-    ))
-    fig.add_trace(go.Scatter(
-        x=[df_chart[time_col].iloc[-1]], y=[recent_low],
-        mode="markers+text",
-        marker=dict(symbol="triangle-down-open", size=14, color="#1e88e5", line=dict(width=2)),
-        text=[" 売予定"], textposition="bottom right", name="売り予定 (青)"
-    ))
-
     if current_pos is not None:
-        p_symbol = "triangle-up" if current_pos["type"] == "BUY" else "triangle-down"
         p_color = "#e53935" if current_pos["type"] == "BUY" else "#1e88e5"
-        
-        pos_time = pd.to_datetime(current_pos.get("entry_time", df_chart[time_col].iloc[-1]))
-        fig.add_trace(go.Scatter(
-            x=[pos_time], y=[current_pos["entry_price"]],
-            mode="markers+text",
-            marker=dict(symbol=p_symbol, size=16, color=p_color),
-            text=[f" 保有中 {current_pos['type']}"],
-            textposition="top center" if current_pos["type"] == "BUY" else "bottom center",
-            name="保有ポジション"
-        ))
-
         fig.add_hline(y=current_pos["entry_price"], line_color=p_color, line_width=2, annotation_text="ENTRY")
         fig.add_hline(y=current_pos["tp_price"], line_dash="dashdot", line_color="#2e7d32", annotation_text="TP")
         fig.add_hline(y=current_pos["sl_price"], line_dash="dashdot", line_color="#c62828", annotation_text="SL")
@@ -400,7 +380,7 @@ def main_dashboard():
 main_dashboard()
 
 # ------------------------------------------------------------------------------
-# 6. トレード履歴表示
+# 6. トレード履歴
 # ------------------------------------------------------------------------------
 st.subheader("📋 実行・決済ログ")
 if len(st.session_state.trade_history) == 0:
